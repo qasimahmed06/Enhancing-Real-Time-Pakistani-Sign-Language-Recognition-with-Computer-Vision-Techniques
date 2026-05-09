@@ -97,6 +97,3 @@ python -m src.infer_dynamic --folder "path/to/video/folder"
 - Dataset root is currently configured in src/config.py.
 - Static classes: 36 alphabet signs (images only)
 - Dynamic classes: 4 video-based gestures (2-Hay, Alifmad, Aray, Jeem)
-- Checkpoints and model artifacts are git-ignored by default.
-- See NEXT_STEPS.md for detailed training instructions
-
