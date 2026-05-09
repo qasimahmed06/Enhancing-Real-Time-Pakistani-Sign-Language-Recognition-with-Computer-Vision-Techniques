@@ -1,6 +1,4 @@
-# Pakistan Sign Language Project (PyTorch)
-
-This repository contains the Python implementation for static PSL recognition first, with dynamic and webcam phases planned next.
+# Enhancing-Real-Time-Pakistani-Sign-Language-Recognition-with-Computer-Vision-Techniques
 
 ## 1) Environment Setup (Windows)
 
