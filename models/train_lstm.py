@@ -7,6 +7,7 @@ from tqdm import tqdm
 from models.lstm import PSL_LSTM
 from models.vgg_feature_extractor import VGGFeatureExtractor
 from dataloader.dataset_prep_videos import PSLVideoDataset, train_transform
+from paths import AUGMENTED_DATASET_ROOT
 
 CONFIG = {
     'batch_size': 8,
@@ -130,7 +131,7 @@ def main():
     vgg_checkpoint = CONFIG['vgg_checkpoint'] if os.path.exists(CONFIG['vgg_checkpoint']) else None
     vgg_extractor = VGGFeatureExtractor(checkpoint_path=vgg_checkpoint, device=device)
     
-    full_dataset = PSLVideoDataset('/kaggle/input/augmented-videos-psl/Dataset_Augmented', transform=train_transform, 
+    full_dataset = PSLVideoDataset(AUGMENTED_DATASET_ROOT, transform=train_transform, 
                                   max_frames=CONFIG['max_frames'], sample_rate=CONFIG['sample_rate'])
     
     print(f"Dataset loaded: {len(full_dataset)} videos found")

@@ -1,9 +1,15 @@
 from torch.utils.data import Dataset
 import os
+import sys
 import cv2
 import torch
+import numpy as np
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from paths import DATASET_ROOT
+from dataloader.preprocessing import apply_canny_edge_enhancement
 
 train_transform = A.Compose([
     A.Resize(224, 224),
@@ -22,11 +28,12 @@ val_transform = A.Compose([
 
 
 class PSLVideoDataset(Dataset):
-    def __init__(self, root_dir, transform=None, max_frames=30, sample_rate=1):
+    def __init__(self, root_dir, transform=None, max_frames=30, sample_rate=1, use_canny=True):
         self.root_dir = root_dir
         self.transform = transform
         self.max_frames = max_frames
         self.sample_rate = sample_rate
+        self.use_canny = use_canny
         self.video_paths = []
         self.labels = []
         self.label_map = {}
@@ -57,6 +64,8 @@ class PSLVideoDataset(Dataset):
             
             if frame_count % self.sample_rate == 0:
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                if self.use_canny:
+                    frame_rgb = apply_canny_edge_enhancement(frame_rgb)
                 frames.append(frame_rgb)
             frame_count += 1
         
@@ -83,7 +92,7 @@ class PSLVideoDataset(Dataset):
         return torch.stack(transformed_frames), label, video_path
 
 if __name__ == "__main__":
-    dataset = PSLVideoDataset("Dataset", transform=train_transform, max_frames=30, sample_rate=2)
+    dataset = PSLVideoDataset(DATASET_ROOT, transform=train_transform, max_frames=30, sample_rate=2)
     if len(dataset) > 0:
         frames, label, video_path = dataset[0]
         print(f"Sample: {video_path}, Label: {label}, Shape: {frames.shape}")

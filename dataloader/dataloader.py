@@ -10,6 +10,7 @@ from dataset_prep_videos import PSLVideoDataset, train_transform as video_train_
 # Import VGG feature extractor
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.vgg_feature_extractor import VGGFeatureExtractor
+from paths import AUGMENTED_DATASET_ROOT, DATASET_ROOT
 import torch
 
 
@@ -19,7 +20,7 @@ def test_image_dataset():
     print("IMAGE DATASET TEST")
     print("=" * 60)
     
-    dataset = PSLDataset(root_dir='Dataset', train_transform=image_train_transform)
+    dataset = PSLDataset(root_dir=DATASET_ROOT, train_transform=image_train_transform)
     loader = DataLoader(dataset, batch_size=8, shuffle=False, num_workers=0)
     
     print(f"\n📊 Dataset Info:")
@@ -54,7 +55,7 @@ def test_video_dataset():
     print("=" * 60)
     
     dataset = PSLVideoDataset(
-        root_dir='Dataset', 
+        root_dir=DATASET_ROOT, 
         transform=video_train_transform,
         max_frames=30,
         sample_rate=2
@@ -94,7 +95,7 @@ def test_vgg_feature_extraction():
     
     # Load video dataset
     dataset = PSLVideoDataset(
-        root_dir='Dataset', 
+        root_dir=AUGMENTED_DATASET_ROOT, 
         transform=video_train_transform,
         max_frames=30,
         sample_rate=2

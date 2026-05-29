@@ -10,6 +10,7 @@ Author: Adyaan Ahmed
 
 import argparse
 import os
+import sys
 from pathlib import Path
 import json
 
@@ -28,7 +29,9 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import seaborn as sns
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dataloader.dataset_prep import PSLDataset, val_transform
+from paths import DATASET_ROOT
 
 # IEEE-style plot configuration
 plt.rcParams.update({
@@ -310,7 +313,7 @@ def main():
     )
     parser.add_argument('--checkpoint', type=str, default='checkpoints/vgg16_psl_best.pth',
                        help='Path to model checkpoint')
-    parser.add_argument('--dataset', type=str, default='Dataset',
+    parser.add_argument('--dataset', type=str, default=DATASET_ROOT,
                        help='Path to dataset directory')
     parser.add_argument('--batch-size', type=int, default=32,
                        help='Batch size for evaluation')

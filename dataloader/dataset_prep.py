@@ -2,6 +2,9 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 import os
 from PIL import Image
+import numpy as np
+
+from dataloader.preprocessing import apply_canny_edge_enhancement
 
 train_transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -27,10 +30,11 @@ val_transform = transforms.Compose([
 
 
 class PSLDataset(Dataset):
-    def __init__(self , root_dir , train_transform=None , val_transform=None):
+    def __init__(self , root_dir , train_transform=None , val_transform=None, use_canny=True):
         self.root_dir = root_dir
         self.train_transform = train_transform
         self.val_transform = val_transform
+        self.use_canny = use_canny
         self.image_paths = [] # storing image paths for preprocessing
         self.labels = [] # storing labels for the those images
         self.label_map = {} # mapping class names to integer labels
@@ -74,7 +78,12 @@ class PSLDataset(Dataset):
         label = self.labels[index]
         
         
-        image = Image.open(image_path).convert('RGB')
+        image = np.array(Image.open(image_path).convert('RGB'))
+
+        if self.use_canny:
+            image = apply_canny_edge_enhancement(image)
+
+        image = Image.fromarray(image)
         
         if self.train_transform:
             image = self.train_transform(image)

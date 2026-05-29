@@ -11,6 +11,7 @@ import time
 # Add parent directory to path to import dataloader modules
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from dataloader.dataset_prep import PSLDataset, train_transform, val_transform
+from paths import DATASET_ROOT
 
 # Training Configuration
 CONFIG = {
@@ -77,7 +78,7 @@ def create_dataloaders():
     
     # Create full dataset
     full_dataset = PSLDataset(
-        root_dir='Dataset',
+        root_dir=DATASET_ROOT,
         train_transform=train_transform,
         val_transform=val_transform
     )

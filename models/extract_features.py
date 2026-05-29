@@ -8,6 +8,7 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.vgg_feature_extractor import VGGFeatureExtractor
 from dataloader.dataset_prep_videos import PSLVideoDataset, train_transform
+from paths import AUGMENTED_DATASET_ROOT
 
 
 def extract_and_save_features(dataset, vgg_extractor, save_dir='features', max_frames=30):
@@ -49,7 +50,7 @@ if __name__ == "__main__":
     device = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
     
     vgg_extractor = VGGFeatureExtractor('checkpoints/vgg16_psl_best.pth', device=device)
-    dataset = PSLVideoDataset('Dataset_Augmented', transform=train_transform, max_frames=30, sample_rate=2)
+    dataset = PSLVideoDataset(AUGMENTED_DATASET_ROOT, transform=train_transform, max_frames=30, sample_rate=2)
     extract_and_save_features(dataset, vgg_extractor, save_dir='features', max_frames=30)
     
     print("Done! Now you can use train_lstm_fast.py for much faster training.")

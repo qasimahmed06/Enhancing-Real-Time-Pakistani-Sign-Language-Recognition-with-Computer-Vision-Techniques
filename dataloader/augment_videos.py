@@ -5,11 +5,15 @@ Each video gets multiple augmented versions with different transformations.
 """
 
 import os
+import sys
 import cv2
 import numpy as np
 from tqdm import tqdm
 import albumentations as A
 from pathlib import Path
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from paths import AUGMENTED_DATASET_ROOT, DATASET_ROOT
 
 # Define deterministic augmentation strategies (no randomness)
 AUGMENTATION_STRATEGIES = {
@@ -120,8 +124,8 @@ def augment_video(input_path, output_path, augmentation_transform, sample_rate=1
 
 
 def augment_dataset(
-    input_dir='Dataset',
-    output_dir='Dataset_Augmented',
+    input_dir=DATASET_ROOT,
+    output_dir=AUGMENTED_DATASET_ROOT,
     augmentations=None,
     sample_rate=1,
     skip_original=False
@@ -228,8 +232,8 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description='Augment PSL video dataset')
-    parser.add_argument('--input', type=str, default='Dataset', help='Input dataset directory')
-    parser.add_argument('--output', type=str, default='Dataset_Augmented', help='Output directory')
+    parser.add_argument('--input', type=str, default=DATASET_ROOT, help='Input dataset directory')
+    parser.add_argument('--output', type=str, default=AUGMENTED_DATASET_ROOT, help='Output directory')
     parser.add_argument('--sample-rate', type=int, default=1, help='Sample every Nth frame')
     parser.add_argument('--mode', type=str, default='recommended', 
                        choices=['all', 'recommended', 'minimal'],
