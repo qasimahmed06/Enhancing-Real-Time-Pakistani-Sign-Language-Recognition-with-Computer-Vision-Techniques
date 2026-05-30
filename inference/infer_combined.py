@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Combined Static (VGG) and Dynamic (LSTM) Sign Language Recognition.
+Combined Static (InceptionV3) and Dynamic (InceptionV3 + LSTM) Sign Language Recognition.
 
 Automatically switches between static and dynamic models based on motion detection.
-Static signs use VGG16 classifier, dynamic gestures use LSTM with attention.
+Static signs use an InceptionV3 classifier, dynamic gestures use InceptionV3 features with an LSTM attention head.
 
 Usage:
     python infer_combined.py --video-path path/to/video.mp4
@@ -20,12 +20,20 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
-import timm
-import mediapipe as mp
+from torchvision.models import inception_v3
 
-from models.extract_features import VGGFeatureExtractor
+try:
+    import mediapipe as mp
+    MEDIAPIPE_AVAILABLE = hasattr(mp, "solutions")
+except Exception:
+    mp = None
+    MEDIAPIPE_AVAILABLE = False
+
+from models.inception_feature_extractor import InceptionFeatureExtractor
 from models.lstm import PSL_LSTM
 from dataloader.dataset_prep_videos import val_transform
+from models.checkpoint_utils import normalize_state_dict, infer_num_classes, infer_lstm_input_size
+from roi_utils import center_crop_bbox, detect_hand_roi
 
 class MotionDetector:
     def __init__(self, threshold=10, static_patience=5, dynamic_patience=2):
@@ -82,36 +90,36 @@ class MotionDetector:
 
 
 
-def load_vgg_model(checkpoint_path, device, num_classes=36):
-    print(f"🔧 Loading VGG16 static model from {checkpoint_path}...")
-    model = timm.create_model('vgg16', pretrained=True, num_classes=num_classes)
+def load_inception_model(checkpoint_path, device, num_classes=36):
+    print(f"🔧 Loading InceptionV3 static model from {checkpoint_path}...")
+    model = inception_v3(weights=None, aux_logits=False, num_classes=num_classes)
     
     if checkpoint_path and Path(checkpoint_path).exists():
-        ckpt = torch.load(checkpoint_path, map_location=device)
-        if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
-            model.load_state_dict(ckpt['model_state_dict'])
-        else:
-            try:
-                model.load_state_dict(ckpt)
-            except Exception as e:
-                print(f"⚠️  Warning: couldn't load VGG checkpoint: {e}")
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        state_dict = normalize_state_dict(ckpt)
+        inferred_classes = infer_num_classes(state_dict, default=num_classes)
+        if inferred_classes != num_classes:
+            model = inception_v3(weights=None, aux_logits=False, num_classes=inferred_classes)
+            num_classes = inferred_classes
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f"⚠️  Warning: missing keys: {len(missing)}")
+        if unexpected:
+            print(f"⚠️  Warning: unexpected keys: {len(unexpected)}")
     
     model = model.to(device).eval()
     return model
 
-def load_lstm_model(checkpoint_path, device, input_size=512):
+def load_lstm_model(checkpoint_path, device, input_size=2048):
     print(f"🔧 Loading LSTM dynamic model from {checkpoint_path}...")
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     
-    state_dict = checkpoint['model_state_dict']
-    classifier_weight_key = 'classifier.5.weight'
-    if classifier_weight_key in state_dict:
-        num_classes = state_dict[classifier_weight_key].shape[0]
-    else:
-        num_classes = 4
+    state_dict = normalize_state_dict(checkpoint)
+    num_classes = infer_num_classes(state_dict, default=4)
+    input_size = infer_lstm_input_size(state_dict, default=input_size)
         
     model = PSL_LSTM(input_size=input_size, num_classes=num_classes)
-    model.load_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=False)
     model.to(device).eval()
     
     label_map = None
@@ -123,36 +131,6 @@ def load_lstm_model(checkpoint_path, device, input_size=512):
             label_map = lm
             
     return model, label_map, num_classes
-
-
-def extract_hand_bbox(frame_bgr, mp_hands, results=None):
-    if results is None:
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        results = mp_hands.process(frame_rgb)
-    
-    if not results.multi_hand_landmarks:
-        return None
-    
-    hand_landmarks = results.multi_hand_landmarks[0]
-    H, W = frame_bgr.shape[:2]
-    
-    x_coords = [lm.x for lm in hand_landmarks.landmark]
-    y_coords = [lm.y for lm in hand_landmarks.landmark]
-    
-    x_min = int(min(x_coords) * W)
-    x_max = int(max(x_coords) * W)
-    y_min = int(min(y_coords) * H)
-    y_max = int(max(y_coords) * H)
-    
-    pad_x = int((x_max - x_min) * 0.20)
-    pad_y = int((y_max - y_min) * 0.20)
-    
-    x_min = max(0, x_min - pad_x)
-    y_min = max(0, y_min - pad_y)
-    x_max = min(W, x_max + pad_x)
-    y_max = min(H, y_max + pad_y)
-    
-    return (x_min, y_min, x_max - x_min, y_max - y_min)
 
 
 class SentenceBuilder:
@@ -213,7 +191,9 @@ def main():
     parser = argparse.ArgumentParser(description="Combined Static & Dynamic Gesture Inference")
     parser.add_argument('--video-path', type=str, default=None, help='Path to video file (default: webcam)')
     parser.add_argument('--camera-id', type=int, default=0, help='Camera ID if no video path')
-    parser.add_argument('--vgg-checkpoint', type=str, default='checkpoints/vgg16_psl_best.pth')
+    parser.add_argument('--inception-checkpoint', '--vgg-checkpoint', dest='inception_checkpoint', type=str,
+                        default='checkpoints/inceptionv3_psl_best.pth',
+                        help='Path to the InceptionV3 static model checkpoint')
     parser.add_argument('--lstm-checkpoint', type=str, default='checkpoints/lstm_psl_best.pth')
     parser.add_argument('--device', type=str, default=None)
     parser.add_argument('--motion-threshold', type=float, default=0.5, help='Motion sensitivity threshold')
@@ -242,7 +222,7 @@ def main():
             else:
                 static_labels = data
                 
-    vgg_model = load_vgg_model(args.vgg_checkpoint, device, num_classes=len(static_labels))
+    vgg_model = load_inception_model(args.inception_checkpoint, device, num_classes=len(static_labels))
     
     lstm_model, dynamic_labels, num_dynamic_classes = load_lstm_model(args.lstm_checkpoint, device)
     if dynamic_labels is None:
@@ -253,10 +233,14 @@ def main():
     print(f"📋 Static Classes: {len(static_labels)}")
     print(f"📋 Dynamic Classes: {len(dynamic_labels)} ({dynamic_labels})")
     
-    feature_extractor = VGGFeatureExtractor(device=device)
+    feature_extractor = InceptionFeatureExtractor(device=device)
 
-    mp_hands = mp.solutions.hands
-    hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.5)
+    hands = None
+    if MEDIAPIPE_AVAILABLE:
+        mp_hands = mp.solutions.hands
+        hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.5)
+    else:
+        print("⚠️  MediaPipe hands unavailable; combined mode will use OpenCV ROI fallback.")
 
     motion_detector = MotionDetector(threshold=args.motion_threshold, static_patience=5, dynamic_patience=3)
     sentence_builder = SentenceBuilder()
@@ -345,26 +329,30 @@ def main():
                 seq_mode = False
             
             if time.time() - last_static_time > static_interval:
-                bbox = extract_hand_bbox(frame, hands)
-                
+                bbox, roi_source = detect_hand_roi(frame, mp_hands=hands, use_mediapipe=True, crop_ratio=0.80)
                 if bbox:
                     x, y, w, h = bbox
-                    roi = frame[y:y+h, x:x+w]
                     cv2.rectangle(display_frame, (x, y), (x+w, y+h), (255, 255, 0), 2)
-                    
-                    roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-                    transformed = val_transform(image=roi_rgb)
-                    img_tensor = transformed['image'].unsqueeze(0).to(device)
-                    
+
+                    candidate_bboxes = [bbox, center_crop_bbox(frame, crop_ratio=0.80), (0, 0, frame.shape[1], frame.shape[0])]
+                    candidate_probs = []
+
                     with torch.no_grad():
-                        out = vgg_model(img_tensor)
-                        probs = F.softmax(out, dim=1)
+                        for cand_x, cand_y, cand_w, cand_h in candidate_bboxes:
+                            roi = frame[cand_y:cand_y+cand_h, cand_x:cand_x+cand_w]
+                            roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+                            transformed = val_transform(image=roi_rgb)
+                            img_tensor = transformed['image'].unsqueeze(0).to(device)
+                            out = vgg_model(img_tensor)
+                            candidate_probs.append(F.softmax(out, dim=1))
+
+                        probs = torch.stack(candidate_probs, dim=0).mean(dim=0)
                         top_prob, top_idx = torch.max(probs, dim=1)
-                        
+
                         current_pred = static_labels[top_idx.item()]
                         pred_conf = top_prob.item()
                         pred_type = "STATIC"
-                        
+
                         sentence_builder.update_static(current_pred, pred_conf)
                         
                 last_static_time = time.time()

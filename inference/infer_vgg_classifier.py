@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Inference script for the trained VGG16 classifier on prerecorded photos.
+Legacy implementation for the trained InceptionV3 classifier on prerecorded photos.
 
 Behavior:
 - Loads images from a folder (or a single image path)
 - Applies the same validation preprocessing used during training (`val_transform`)
-- Loads the VGG16 classifier checkpoint and runs inference
+- Loads the InceptionV3 classifier checkpoint and runs inference
 - Prints top-k predictions per image and can optionally display the image with overlay
 
 Usage:
-python infer_vgg_classifier.py --images-dir path/to/images --checkpoint checkpoints/vgg16_psl_best.pth
+python infer_inception_classifier.py --image-path path/to/images --checkpoint checkpoints/inceptionv3_psl_best.pth
 
 """
 
@@ -21,10 +21,18 @@ import time
 import cv2
 import torch
 import torch.nn.functional as F
-import timm
-import mediapipe as mp
+from torchvision.models import inception_v3
+
+try:
+    import mediapipe as mp
+    MEDIAPIPE_AVAILABLE = hasattr(mp, "solutions")
+except Exception:
+    mp = None
+    MEDIAPIPE_AVAILABLE = False
 
 from dataloader.dataset_prep_videos import val_transform
+from models.checkpoint_utils import normalize_state_dict, infer_num_classes
+from roi_utils import center_crop_bbox, detect_hand_roi
 
 # Default class mapping (from training). Index -> name
 DEFAULT_LABEL_MAP = {
@@ -50,77 +58,41 @@ def load_label_map_from_json(path):
     return None
 
 
-def build_model(checkpoint_path, device, num_classes=36, model_name='vgg16'):
-    model = timm.create_model(model_name, pretrained=True, num_classes=num_classes)
+def load_class_names_from_checkpoint(checkpoint_path):
+    if not checkpoint_path or not Path(checkpoint_path).exists():
+        return None
+
+    try:
+        ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+        if isinstance(ckpt, dict):
+            class_names = ckpt.get('class_names')
+            if isinstance(class_names, dict):
+                return [class_names[i] for i in range(len(class_names))]
+            if isinstance(class_names, list):
+                return class_names
+    except Exception as exc:
+        print(f"Warning: could not load class names from checkpoint: {exc}")
+    return None
+
+
+def build_model(checkpoint_path, device, num_classes=36, model_name='inception_v3'):
+    model = inception_v3(weights=None, aux_logits=False, num_classes=num_classes)
     if checkpoint_path and Path(checkpoint_path).exists():
         print(f"Loading checkpoint from {checkpoint_path}...")
-        ckpt = torch.load(checkpoint_path, map_location=device)
-        if isinstance(ckpt, dict) and 'model_state_dict' in ckpt:
-            model.load_state_dict(ckpt['model_state_dict'])
-            print("✅ Checkpoint loaded successfully!")
-        else:
-            try:
-                model.load_state_dict(ckpt)
-                print("✅ Checkpoint loaded successfully!")
-            except Exception as e:
-                print(f"⚠️  Warning: couldn't load checkpoint: {e}")
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        state_dict = normalize_state_dict(ckpt)
+        inferred_classes = infer_num_classes(state_dict, default=num_classes)
+        if inferred_classes != num_classes:
+            model = inception_v3(weights=None, aux_logits=False, num_classes=inferred_classes)
+            num_classes = inferred_classes
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f"⚠️  Warning: missing keys: {len(missing)}")
+        if unexpected:
+            print(f"⚠️  Warning: unexpected keys: {len(unexpected)}")
+        print("✅ Checkpoint loaded successfully!")
     model = model.to(device).eval()
     return model
-
-
-def extract_hand_bbox(frame_bgr, mp_hands, results=None):
-    """
-    Extract hand bounding box using MediaPipe Hands detection.
-    Returns: (bbox, hand_landmarks, handedness) or (None, None, None)
-    bbox format: (x, y, w, h)
-    """
-    if results is None:
-        # Convert BGR to RGB for MediaPipe
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        results = mp_hands.process(frame_rgb)
-    
-    if not results.multi_hand_landmarks:
-        return None, None, None
-    
-    H, W = frame_bgr.shape[:2]
-    
-    # If multiple hands detected, prefer right hand, otherwise use first
-    selected_idx = 0
-    selected_handedness = "Right"
-    
-    if results.multi_handedness and len(results.multi_handedness) > 1:
-        for idx, hand_handedness in enumerate(results.multi_handedness):
-            label = hand_handedness.classification[0].label
-            if label == "Right":
-                selected_idx = idx
-                selected_handedness = label
-                break
-    elif results.multi_handedness:
-        selected_handedness = results.multi_handedness[0].classification[0].label
-    
-    hand_landmarks = results.multi_hand_landmarks[selected_idx]
-    
-    # Get bounding box from landmarks
-    x_coords = [lm.x for lm in hand_landmarks.landmark]
-    y_coords = [lm.y for lm in hand_landmarks.landmark]
-    
-    x_min = int(min(x_coords) * W)
-    x_max = int(max(x_coords) * W)
-    y_min = int(min(y_coords) * H)
-    y_max = int(max(y_coords) * H)
-    
-    # Add padding (20% on each side)
-    pad_x = int((x_max - x_min) * 0.20)
-    pad_y = int((y_max - y_min) * 0.20)
-    
-    x_min = max(0, x_min - pad_x)
-    y_min = max(0, y_min - pad_y)
-    x_max = min(W, x_max + pad_x)
-    y_max = min(H, y_max + pad_y)
-    
-    bbox = (x_min, y_min, x_max - x_min, y_max - y_min)
-    
-    return bbox, hand_landmarks, selected_handedness
 
 
 def gather_image_paths(images_dir_or_file):
@@ -136,11 +108,11 @@ def gather_image_paths(images_dir_or_file):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="VGG16 Classifier Inference on Images")
+    parser = argparse.ArgumentParser(description="InceptionV3 Classifier Inference on Images")
     parser.add_argument('--image-path', type=str, required=True,
                         help='Path to a single image OR a directory containing images')
-    parser.add_argument('--checkpoint', type=str, default='checkpoints/vgg16_psl_best.pth',
-                        help='Path to VGG checkpoint')
+    parser.add_argument('--checkpoint', type=str, default='checkpoints/inceptionv3_psl_best.pth',
+                        help='Path to InceptionV3 checkpoint')
     parser.add_argument('--device', type=str, default=None,
                         help='Device (cuda/mps/cpu). Auto-detected if not specified.')
     parser.add_argument('--label-map-json', type=str, default=None,
@@ -178,6 +150,11 @@ def main():
         if lm:
             label_list = lm
             print(f"📋 Loaded label map from JSON: {len(label_list)} classes")
+    else:
+        checkpoint_labels = load_class_names_from_checkpoint(args.checkpoint)
+        if checkpoint_labels:
+            label_list = checkpoint_labels
+            print(f"📋 Loaded class_names from checkpoint: {len(label_list)} classes")
 
     if args.checkpoint and Path(args.checkpoint).exists():
         try:
@@ -194,17 +171,21 @@ def main():
             pass
 
     # build model
-    model = build_model(args.checkpoint, device, num_classes=len(label_list), model_name='vgg16')
-    print(f"🎯 Model: VGG16 with {len(label_list)} classes")
+    model = build_model(args.checkpoint, device, num_classes=len(label_list), model_name='inception_v3')
+    print(f"🎯 Model: InceptionV3 with {len(label_list)} classes")
 
-    # Initialize MediaPipe Hands
-    print("🤚 Initializing MediaPipe Hands...")
-    mp_hands = mp.solutions.hands
-    hands = mp_hands.Hands(
-        static_image_mode=True,  # True for images
-        max_num_hands=2,
-        min_detection_confidence=0.5
-    )
+    # Initialize MediaPipe Hands when available; ROI helper will still fall back to skin/center crops.
+    hands = None
+    if MEDIAPIPE_AVAILABLE:
+        print("🤚 Initializing MediaPipe Hands...")
+        mp_hands = mp.solutions.hands
+        hands = mp_hands.Hands(
+            static_image_mode=True,
+            max_num_hands=2,
+            min_detection_confidence=0.5
+        )
+    else:
+        print("⚠️  MediaPipe hands unavailable; using OpenCV ROI fallback.")
 
     # process images
     for idx, img_path in enumerate(image_paths, 1):
@@ -215,36 +196,30 @@ def main():
 
         img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
         
-        # Extract hand
-        bbox, hand_landmarks, handedness = extract_hand_bbox(img_bgr, hands)
-        
-        if bbox is not None:
-            x, y, w, h = bbox
-            roi = img_bgr[y:y+h, x:x+w]
-            roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-            status_msg = f"Hand detected ({handedness})"
-        else:
-            # Fallback: use center crop or full image
-            print(f"⚠️  No hand detected in {img_path.name}, using full image")
-            roi_rgb = img_rgb
-            bbox = None
-            status_msg = "No hand detected"
-
-        # use same validation transform
-        transformed = val_transform(image=roi_rgb)
-        img_tensor = transformed['image'].unsqueeze(0).to(device)
-
+        bbox, roi_source = detect_hand_roi(img_bgr, mp_hands=hands, use_mediapipe=True, crop_ratio=0.80)
         t0 = time.time()
         with torch.no_grad():
-            outputs = model(img_tensor)
-            probs = F.softmax(outputs, dim=1)
+            candidate_bboxes = [bbox, center_crop_bbox(img_bgr, crop_ratio=0.80), (0, 0, img_bgr.shape[1], img_bgr.shape[0])]
+            candidate_sources = [roi_source, "center", "full"]
+            candidate_probs = []
+
+            for (x, y, w, h), source in zip(candidate_bboxes, candidate_sources):
+                roi = img_bgr[y:y+h, x:x+w]
+                roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+                transformed = val_transform(image=roi_rgb)
+                img_tensor = transformed['image'].unsqueeze(0).to(device)
+                outputs = model(img_tensor)
+                probs = F.softmax(outputs, dim=1)
+                candidate_probs.append(probs)
+
+            probs = torch.stack(candidate_probs, dim=0).mean(dim=0)
             topk = torch.topk(probs, k=min(args.topk, probs.size(1)), dim=1)
             top_indices = topk.indices[0].tolist()
             top_probs = topk.values[0].tolist()
         t1 = time.time()
 
         # print results
-        print(f"[{idx}/{len(image_paths)}] {img_path.name} - {status_msg} - Inference: {(t1-t0)*1000:.1f} ms")
+        print(f"[{idx}/{len(image_paths)}] {img_path.name} - ROI ensemble ({roi_source}) - Inference: {(t1-t0)*1000:.1f} ms")
         for rank, (i_cls, p) in enumerate(zip(top_indices, top_probs), 1):
             name = label_list[i_cls] if i_cls < len(label_list) else f"Class_{i_cls}"
             print(f"  {rank}. {name}: {p*100:.2f}%")
@@ -267,7 +242,8 @@ def main():
             if key == 27:  # ESC to quit early
                 break
     
-    hands.close()
+    if hands is not None:
+        hands.close()
     cv2.destroyAllWindows()
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-FIXED webcam inference for LSTM PSL classifier with SLIDING WINDOW.
-Matches training pipeline EXACTLY + optimal real-time performance.
+Video or webcam inference for the dynamic PSL classifier with SLIDING WINDOW.
+Uses InceptionV3 frame features and an LSTM attention head.
 """
 
 import argparse
@@ -9,16 +9,22 @@ import time
 from pathlib import Path
 import json
 from collections import deque
+import os
+import sys
 
 import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
-import sys
-from models.extract_features import VGGFeatureExtractor
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from models.inception_feature_extractor import InceptionFeatureExtractor
 from models.lstm import PSL_LSTM
 from dataloader.dataset_prep_videos import val_transform
 from dataloader.dataset_prep_videos import PSLVideoDataset
+from models.checkpoint_utils import normalize_state_dict, infer_num_classes, infer_lstm_input_size
+from models.vgg_feature_extractor import VGGFeatureExtractor
 
 
 DEFAULT_LABEL_MAP = {
@@ -66,6 +72,8 @@ def main():
                         help='Number of predictions to average for smoothing (1 = no smoothing)')
     parser.add_argument('--inference-interval', type=int, default=1,
                         help='Run inference every N sampled frames (1 = every frame, 5 = every 5th)')
+    parser.add_argument('--motion-threshold', type=float, default=1.5,
+                        help='Minimum frame-difference motion needed before predicting')
     args = parser.parse_args()
 
     # Device - EXACT same logic
@@ -81,11 +89,6 @@ def main():
 
     print(f"🖥️  Using device: {device}")
 
-    # Load VGG extractor - EXACT same way as fixed script
-    print("🔧 Loading VGG16 feature extractor...")
-    extractor = VGGFeatureExtractor(device=device)
-    print("✅ VGG16 feature extractor loaded!\n")
-
     # Load LSTM - EXACT same logic
     print("🔧 Loading LSTM model...")
     checkpoint = torch.load(args.lstm_checkpoint, map_location=device, weights_only=False)
@@ -97,24 +100,30 @@ def main():
     if 'epoch' in checkpoint:
         print(f"Checkpoint Epoch: {checkpoint['epoch']}")
     
-    # Get num_classes from checkpoint
-    state_dict = checkpoint['model_state_dict']
-    classifier_weight_key = 'classifier.5.weight'
-    
-    if classifier_weight_key in state_dict:
-        num_classes = state_dict[classifier_weight_key].shape[0]
-        print(f"\n✅ CHECKPOINT has {num_classes} output classes")
-    else:
-        num_classes = len(DEFAULT_LABEL_MAP)
-        print(f"\n⚠️  Could not detect num_classes from checkpoint, using default: {num_classes}")
+    # Infer model dimensions from checkpoint
+    state_dict = normalize_state_dict(checkpoint)
+    num_classes = infer_num_classes(state_dict, default=len(DEFAULT_LABEL_MAP))
+    input_size = infer_lstm_input_size(state_dict, default=2048)
+    print(f"\n✅ CHECKPOINT has {num_classes} output classes")
+    print(f"✅ CHECKPOINT expects feature size {input_size}")
     
     # Create model
-    model = PSL_LSTM(input_size=512, num_classes=num_classes)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model = PSL_LSTM(input_size=input_size, num_classes=num_classes)
+    model.load_state_dict(state_dict, strict=False)
     model.to(device)
     model.eval()
     print(f"✅ LSTM loaded with {num_classes} output classes")
     print(f"✅ Epoch {checkpoint.get('epoch', 'N/A')}, Val Acc: {checkpoint.get('val_acc', 0):.2f}%\n")
+
+    # Pick the feature extractor that matches the checkpoint input width.
+    if input_size == 512:
+        print("🔧 Loading VGG feature extractor for 512-dim LSTM inputs...")
+        extractor = VGGFeatureExtractor(device=device)
+        print("✅ VGG feature extractor loaded!\n")
+    else:
+        print("🔧 Loading InceptionV3 feature extractor...")
+        extractor = InceptionFeatureExtractor(device=device)
+        print("✅ InceptionV3 feature extractor loaded!\n")
 
     # Load label map
     label_list = [DEFAULT_LABEL_MAP[i] for i in range(len(DEFAULT_LABEL_MAP))]
@@ -179,6 +188,8 @@ def main():
     current_prediction = None
     current_confidence = 0.0
     predictions_made = 0
+    prev_gray = None
+    motion_metric = 0.0
 
     try:
         while True:
@@ -192,6 +203,13 @@ def main():
             # Sample frames based on sample_rate
             if frame_count % args.sample_rate == 0:
                 # Process full frame
+                frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                frame_gray = cv2.GaussianBlur(frame_gray, (21, 21), 0)
+                if prev_gray is not None:
+                    diff = cv2.absdiff(prev_gray, frame_gray)
+                    motion_metric = float(np.mean(diff))
+                prev_gray = frame_gray
+
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 
                 # Preprocess frame using val_transform (EXACT same as training)
@@ -217,6 +235,11 @@ def main():
                 min_frames_needed = min(args.max_frames, 8)
                 
                 if len(feature_buffer) >= min_frames_needed and sampled_count % args.inference_interval == 0:
+                    if motion_metric < args.motion_threshold:
+                        current_prediction = None
+                        current_confidence = 0.0
+                        continue
+
                     with torch.no_grad():
                         # Stack features from buffer -> (N, 512)
                         features = torch.stack(list(feature_buffer)).to(device)
@@ -281,8 +304,8 @@ def main():
                 pred_text = f"{current_prediction}: {current_confidence*100:.1f}%"
                 status_text = f"Predictions: {predictions_made}"
             else:
-                pred_text = f"Warming up... ({buffer_size}/{args.max_frames})"
-                status_text = "Collecting frames..."
+                pred_text = f"Waiting for motion... ({buffer_size}/{args.max_frames})"
+                status_text = f"Collecting frames... Motion: {motion_metric:.2f}"
             
             # Draw prediction with background
             (text_w, text_h), baseline = cv2.getTextSize(pred_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
